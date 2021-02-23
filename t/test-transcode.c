@@ -40,38 +40,32 @@ static struct call_media *media_A;
 static struct call_media *media_B;
 struct call_monologue ml_A;
 struct call_monologue ml_B;
-static GQueue rtp_types = G_QUEUE_INIT;
+struct stream_params rtp_types_sp;
 
 #define start() __start(__FILE__, __LINE__)
 
-static void __pt_slice_free(void *p) {
-	g_slice_free1(sizeof(struct rtp_payload_type), p);
-}
 static void __cleanup(void) {
-	if (flags.codec_strip)
-		g_hash_table_destroy(flags.codec_strip);
-	if (flags.codec_mask)
-		g_hash_table_destroy(flags.codec_mask);
 	if (flags.codec_except)
 		g_hash_table_destroy(flags.codec_except);
 	if (flags.codec_set)
 		g_hash_table_destroy(flags.codec_set);
-	if (flags.codec_consume)
-		g_hash_table_destroy(flags.codec_consume);
-	if (flags.codec_accept)
-		g_hash_table_destroy(flags.codec_accept);
+	if (flags.sdes_no)
+		g_hash_table_destroy(flags.sdes_no);
+	g_queue_clear_full(&flags.codec_offer, free);
 	g_queue_clear_full(&flags.codec_transcode, free);
-	g_queue_clear_full(&rtp_types, __pt_slice_free);
+	g_queue_clear_full(&flags.codec_strip, free);
+	g_queue_clear_full(&flags.codec_accept, free);
+	g_queue_clear_full(&flags.codec_consume, free);
+	g_queue_clear_full(&flags.codec_mask, free);
+
+	codec_store_cleanup(&rtp_types_sp.codecs);
 	memset(&flags, 0, sizeof(flags));
 }
 static void __init(void) {
 	__cleanup();
-	flags.codec_strip = g_hash_table_new_full(str_case_hash, str_case_equal, free, NULL);
-	flags.codec_mask = g_hash_table_new_full(str_case_hash, str_case_equal, free, NULL);
+	codec_store_init(&rtp_types_sp.codecs, NULL);
 	flags.codec_except = g_hash_table_new_full(str_case_hash, str_case_equal, free, NULL);
 	flags.codec_set = g_hash_table_new_full(str_case_hash, str_case_equal, free, free);
-	flags.codec_consume = g_hash_table_new_full(str_case_hash, str_case_equal, free, NULL);
-	flags.codec_accept = g_hash_table_new_full(str_case_hash, str_case_equal, free, NULL);
 }
 static void __start(const char *file, int line) {
 	printf("running test %s:%i\n", file, line);
@@ -98,6 +92,9 @@ static void __start(const char *file, int line) {
 }
 
 #define transcode(codec) g_queue_push_tail(&flags.codec_transcode, sdup(#codec))
+#define c_accept(codec) g_queue_push_tail(&flags.codec_accept, sdup(#codec))
+#define c_consume(codec) g_queue_push_tail(&flags.codec_consume, sdup(#codec))
+#define c_mask(codec) g_queue_push_tail(&flags.codec_mask, sdup(#codec))
 
 #ifdef WITH_AMR_TESTS
 static void codec_set(char *c) {
@@ -117,21 +114,20 @@ static void codec_set(char *c) {
 }
 #endif
 
-static void __ht_set(GHashTable *h, char *x) {
-	str *d = sdup(x);
-	g_hash_table_insert(h, d, d);
-}
-#define ht_set(ht, s) __ht_set(flags.ht, #s)
+//static void __ht_set(GHashTable *h, char *x) {
+//	str *d = sdup(x);
+//	g_hash_table_insert(h, d, d);
+//}
+//#define ht_set(ht, s) __ht_set(flags.ht, #s)
 
 #define sdp_pt_fmt(num, codec, clockrate, fmt) \
 	__sdp_pt_fmt(num, (str) STR_CONST_INIT(#codec), clockrate, (str) STR_CONST_INIT(#codec "/" #clockrate), \
 			(str) STR_CONST_INIT(#codec "/" #clockrate "/1"), (str) STR_CONST_INIT(fmt))
 
 static void __sdp_pt_fmt(int num, str codec, int clockrate, str full_codec, str full_full, str fmt) {
-	struct rtp_payload_type *pt = g_slice_alloc(sizeof(*pt));
-	*pt = (struct rtp_payload_type) { num, full_codec, full_full, codec,
+	struct rtp_payload_type pt = { num, full_codec, full_full, codec,
 		clockrate, STR_CONST_INIT(""), 1, fmt, {0,0}, {0,0}, 0, 0, NULL };
-	g_queue_push_tail(&rtp_types, pt);
+	codec_store_add_raw(&rtp_types_sp.codecs, rtp_payload_type_dup(&pt));
 }
 
 #define sdp_pt(num, codec, clockrate) sdp_pt_fmt(num, codec, clockrate, "")
@@ -139,25 +135,21 @@ static void __sdp_pt_fmt(int num, str codec, int clockrate, str full_codec, str 
 static void offer(void) {
 	printf("offer\n");
 	flags.opmode = OP_OFFER;
-	codec_tracker_init(media_B);
-	codec_rtp_payload_types(media_B, media_A, &rtp_types, &flags);
+	codecs_offer_answer(media_B, media_A, &rtp_types_sp, &flags);
 	codec_handlers_update(media_B, media_A, &flags, NULL);
-	codec_tracker_finish(media_B, media_A);
 	__init();
 }
 
 static void answer(void) {
 	printf("answer\n");
 	flags.opmode = OP_ANSWER;
-	codec_tracker_init(media_A);
-	codec_rtp_payload_types(media_A, media_B, &rtp_types, &flags);
+	codecs_offer_answer(media_A, media_B, &rtp_types_sp, &flags);
 	codec_handlers_update(media_A, media_B, &flags, NULL);
-	codec_tracker_finish(media_A, media_B);
 	__init();
 }
 
-#define expect(side, dir, codecs) \
-	__expect(__FILE__, __LINE__, &media_ ## side->codecs_prefs_ ## dir, codecs)
+#define expect(side, dir, exp_str) \
+	__expect(__FILE__, __LINE__, &media_ ## side->codecs_ ## dir.codec_prefs, exp_str)
 
 static void __expect(const char *file, int line, GQueue *dumper, const char *codecs) {
 	printf("running test %s:%i\n", file, line);
@@ -364,6 +356,8 @@ static void dtmf(const char *s) {
 #define AMR_WB_payload_noe "\xf1\xfc\xc1\x82\x04\x1d\xcc\x88\xc8\x34\xd4\x18\x84\xb1\xdf\x38\xba\xa1\x03\x9b\xbd\x13\x79\x1f\xf2\x53\x33\x16\x17\x7b\x73\x17\x5f\x1b\x05\x1f\x70" // bandwidth efficient
 
 int main(void) {
+	rtpe_common_config_ptr = &rtpe_config.common;
+
 	unsigned long random_seed = 0;
 
 	codeclib_init(0);
@@ -375,10 +369,8 @@ int main(void) {
 	start();
 	sdp_pt(0, PCMU, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000");
 	expect(B, recv, "0/PCMU/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	answer();
 	expect(A, recv, "0/PCMU/8000");
@@ -394,10 +386,8 @@ int main(void) {
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
@@ -416,10 +406,8 @@ int main(void) {
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	answer();
 	expect(A, recv, "8/PCMA/8000");
@@ -430,71 +418,44 @@ int main(void) {
 	packet(B, 8, PCMA_payload, 8, PCMA_payload);
 	end();
 
-	// plain with two offered and one answered + asymmetric codecs
-	start();
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	flags.asymmetric_codecs = 1;
-	answer();
-	expect(A, recv, "8/PCMA/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "8/PCMA/8000");
-	packet_seq(A, 0, PCMU_payload, 0, 0, 0, PCMU_payload);
-	packet_seq(A, 8, PCMA_payload, 160, 1, 8, PCMA_payload);
-	packet(B, 8, PCMA_payload, 8, PCMA_payload);
-	end();
-
 	// plain with two offered and two answered + always-transcode one way
 	start();
-	ht_set(codec_accept, all);
+	c_accept(all);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
+	expect(A, recv, "0/PCMU/8000");
+	expect(A, send, "0/PCMU/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, send, "0/PCMU/8000 8/PCMA/8000");
 	packet_seq(A, 0, PCMU_payload, 0, 0, 0, PCMU_payload);
 	packet_seq(B, 0, PCMU_payload, 0, 0, 0, PCMU_payload);
-	packet_seq(A, 8, PCMA_payload, 160, 1, 8, PCMA_payload);
 	packet_seq(B, 8, PCMA_payload, 160, 1, 0, PCMU_payload);
 	end();
 
 	// plain with two offered and two answered + always-transcode both ways
 	start();
-	ht_set(codec_accept, all);
+	c_accept(all);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
-	ht_set(codec_accept, all);
+	c_accept(all);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000");
+	expect(A, recv, "0/PCMU/8000");
+	expect(A, send, "0/PCMU/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
 	expect(B, send, "0/PCMU/8000 8/PCMA/8000");
 	packet_seq(A, 0, PCMU_payload, 0, 0, 0, PCMU_payload);
 	packet_seq(B, 0, PCMU_payload, 0, 0, 0, PCMU_payload);
-	packet_seq(A, 8, PCMA_payload, 160, 1, 0, PCMU_payload);
 	packet_seq(B, 8, PCMA_payload, 160, 1, 0, PCMU_payload);
 	end();
 
@@ -503,10 +464,8 @@ int main(void) {
 	sdp_pt(0, PCMU, 8000);
 	transcode(PCMA);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
@@ -524,10 +483,8 @@ int main(void) {
 	sdp_pt(0, PCMU, 8000);
 	transcode(PCMA);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "0/PCMU/8000");
 	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	answer();
 	expect(A, recv, "0/PCMU/8000");
@@ -536,27 +493,6 @@ int main(void) {
 	expect(B, send, "8/PCMA/8000");
 	packet(A, 0, PCMU_payload, 8, PCMA_payload);
 	packet(B, 8, PCMA_payload, 0, PCMU_payload);
-	end();
-
-	// same as above, but allow asymmetric codecs
-	start();
-	sdp_pt(0, PCMU, 8000);
-	transcode(PCMA);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "0/PCMU/8000");
-	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	flags.asymmetric_codecs = 1;
-	answer();
-	expect(A, recv, "0/PCMU/8000");
-	expect(A, send, "0/PCMU/8000");
-	expect(B, recv, "0/PCMU/8000 8/PCMA/8000");
-	expect(B, send, "8/PCMA/8000");
-	packet(A, 0, PCMU_payload, 8, PCMA_payload);
-	packet_seq(B, 8, PCMA_payload, 0, 0, 0, PCMU_payload);
-	packet_seq(B, 0, PCMU_payload, 160, 1, 0, PCMU_payload);
 	end();
 
 #ifdef WITH_AMR_TESTS
@@ -759,10 +695,8 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	transcode(G722);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000");
 	expect(B, recv, "8/PCMA/8000 9/G722/8000");
-	expect(B, send, "");
 	sdp_pt(9, G722, 8000);
 	answer();
 	expect(A, recv, "8/PCMA/8000");
@@ -783,36 +717,14 @@ int main(void) {
 	sdp_pt(9, G722, 8000);
 	sdp_pt(8, PCMA, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
 	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, send, "");
 	sdp_pt(9, G722, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
 	expect(A, recv, "9/G722/8000 8/PCMA/8000");
 	expect(A, send, "9/G722/8000 8/PCMA/8000");
 	expect(B, recv, "9/G722/8000 8/PCMA/8000");
-	expect(B, send, "9/G722/8000 8/PCMA/8000");
-	end();
-
-	// A includes unsupported codec by B - no transcoding (GH#562 control case) + asymmetric codecs
-	start();
-	sdp_pt(97, opus, 48000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(8, PCMA, 8000);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, send, "");
-	sdp_pt(9, G722, 8000);
-	sdp_pt(8, PCMA, 8000);
-	flags.asymmetric_codecs = 1;
-	answer();
-	expect(A, recv, "9/G722/8000 8/PCMA/8000");
-	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000");
 	expect(B, send, "9/G722/8000 8/PCMA/8000");
 	end();
 
@@ -823,16 +735,14 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	transcode(PCMU); // standin for G729
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
 	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000 0/PCMU/8000");
-	expect(B, send, "");
 	sdp_pt(9, G722, 8000);
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(0, PCMU, 8000);
 	answer();
-	expect(A, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
+	expect(A, recv, "9/G722/8000 8/PCMA/8000 97/opus/48000");
+	expect(A, send, "9/G722/8000 8/PCMA/8000 97/opus/48000");
 	expect(B, recv, "9/G722/8000 8/PCMA/8000 0/PCMU/8000");
 	expect(B, send, "9/G722/8000 8/PCMA/8000 0/PCMU/8000");
 	end();
@@ -844,37 +754,14 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	transcode(PCMU); // standin for G729
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
 	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000 0/PCMU/8000");
-	expect(B, send, "");
 	sdp_pt(9, G722, 8000);
 	sdp_pt(8, PCMA, 8000);
 	answer();
 	expect(A, recv, "9/G722/8000 8/PCMA/8000");
 	expect(A, send, "9/G722/8000 8/PCMA/8000");
 	expect(B, recv, "9/G722/8000 8/PCMA/8000");
-	expect(B, send, "9/G722/8000 8/PCMA/8000");
-	end();
-
-	// A includes unsupported codec by B - transcoded codec rejected (GH#562) + asymmetric codecs
-	start();
-	sdp_pt(97, opus, 48000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(8, PCMA, 8000);
-	transcode(PCMU); // standin for G729
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000 0/PCMU/8000");
-	expect(B, send, "");
-	sdp_pt(9, G722, 8000);
-	sdp_pt(8, PCMA, 8000);
-	flags.asymmetric_codecs = 1;
-	answer();
-	expect(A, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(A, send, "97/opus/48000 9/G722/8000 8/PCMA/8000");
-	expect(B, recv, "97/opus/48000 9/G722/8000 8/PCMA/8000 0/PCMU/8000");
 	expect(B, send, "9/G722/8000 8/PCMA/8000");
 	end();
 
@@ -885,10 +772,8 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -938,10 +823,8 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	transcode(PCMU);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -990,10 +873,8 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -1042,10 +923,8 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -1111,10 +990,8 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	transcode(PCMU);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -1179,10 +1056,8 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	offer();
-	expect(A, recv, "");
 	expect(A, send, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "");
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
 	answer();
@@ -1274,7 +1149,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_mask, PCMU);
+	c_mask(PCMU);
 	offer();
 	expect(A, recv, "");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
@@ -1297,7 +1172,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_mask, PCMU);
+	c_mask(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1321,7 +1196,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_mask, PCMU);
+	c_mask(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1343,32 +1218,6 @@ int main(void) {
 	// asymmetric codec
 	packet(B, 8, PCMA_payload, 8, PCMA_payload); // nothing due to resampling
 	end();
-	// codec-mask + transcode + accept transcoded codec + symmetric codecs
-	start();
-	sdp_pt(104, SILK, 16000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	sdp_pt(13, CN, 8000);
-	sdp_pt(118, CN, 16000);
-	ht_set(codec_mask, PCMU);
-	transcode(GSM);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "9/G722/8000 8/PCMA/8000 3/GSM/8000 101/telephone-event/8000 13/CN/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(3, GSM, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	flags.symmetric_codecs = 1;
-	answer();
-	expect(A, recv, "8/PCMA/8000 9/G722/8000 0/PCMU/8000 13/CN/8000 101/telephone-event/8000");
-	expect(A, send, "8/PCMA/8000 101/telephone-event/8000 104/SILK/16000 9/G722/8000 0/PCMU/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	expect(B, send, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	end();
 	// codec-consume only
 	start();
 	sdp_pt(104, SILK, 16000);
@@ -1378,7 +1227,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_consume, PCMU);
+	c_consume(PCMU);
 	offer();
 	expect(A, recv, "");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
@@ -1389,30 +1238,6 @@ int main(void) {
 	answer();
 	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "8/PCMA/8000 101/telephone-event/8000");
-	end();
-	// codec-consume w symmetric codecs
-	start();
-	sdp_pt(104, SILK, 16000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	sdp_pt(13, CN, 8000);
-	sdp_pt(118, CN, 16000);
-	ht_set(codec_consume, PCMU);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "9/G722/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	flags.symmetric_codecs = 1;
-	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 104/SILK/16000 9/G722/8000 13/CN/8000 118/CN/16000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, send, "8/PCMA/8000 101/telephone-event/8000");
 	end();
@@ -1425,7 +1250,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_consume, PCMU);
+	c_consume(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1449,7 +1274,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_consume, PCMU);
+	c_consume(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1462,32 +1287,6 @@ int main(void) {
 	answer();
 	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	expect(B, send, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	end();
-	// codec-consume + transcode + accept transcoded codec + symmetric codecs
-	start();
-	sdp_pt(104, SILK, 16000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	sdp_pt(13, CN, 8000);
-	sdp_pt(118, CN, 16000);
-	ht_set(codec_consume, PCMU);
-	transcode(GSM);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "9/G722/8000 8/PCMA/8000 3/GSM/8000 101/telephone-event/8000 13/CN/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(3, GSM, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	flags.symmetric_codecs = 1;
-	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 104/SILK/16000 9/G722/8000 13/CN/8000 118/CN/16000");
 	expect(B, recv, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
 	expect(B, send, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
 	end();
@@ -1500,7 +1299,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, PCMU);
+	c_accept(PCMU);
 	offer();
 	expect(A, recv, "");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
@@ -1511,30 +1310,6 @@ int main(void) {
 	answer();
 	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
-	expect(B, send, "8/PCMA/8000 101/telephone-event/8000");
-	end();
-	// codec-accept w symmetric codecs
-	start();
-	sdp_pt(104, SILK, 16000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	sdp_pt(13, CN, 8000);
-	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, PCMU);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	flags.symmetric_codecs = 1;
-	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 104/SILK/16000 9/G722/8000 13/CN/8000 118/CN/16000");
 	expect(B, recv, "8/PCMA/8000 101/telephone-event/8000");
 	expect(B, send, "8/PCMA/8000 101/telephone-event/8000");
 	end();
@@ -1547,7 +1322,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, PCMU);
+	c_accept(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1571,7 +1346,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, PCMU);
+	c_accept(PCMU);
 	transcode(GSM);
 	offer();
 	expect(A, recv, "");
@@ -1584,32 +1359,6 @@ int main(void) {
 	answer();
 	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	expect(B, send, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
-	end();
-	// codec-accept + transcode + accept transcoded codec + symmetric codecs
-	start();
-	sdp_pt(104, SILK, 16000);
-	sdp_pt(9, G722, 8000);
-	sdp_pt(0, PCMU, 8000);
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	sdp_pt(13, CN, 8000);
-	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, PCMU);
-	transcode(GSM);
-	offer();
-	expect(A, recv, "");
-	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
-	expect(B, recv, "9/G722/8000 0/PCMU/8000 8/PCMA/8000 3/GSM/8000 101/telephone-event/8000 13/CN/8000");
-	expect(B, send, "");
-	sdp_pt(8, PCMA, 8000);
-	sdp_pt(3, GSM, 8000);
-	sdp_pt(101, telephone-event, 8000);
-	flags.symmetric_codecs = 1;
-	answer();
-	expect(A, recv, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000");
-	expect(A, send, "0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 104/SILK/16000 9/G722/8000 13/CN/8000 118/CN/16000");
 	expect(B, recv, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
 	expect(B, send, "8/PCMA/8000 3/GSM/8000 101/telephone-event/8000");
 	end();
@@ -1622,7 +1371,7 @@ int main(void) {
 	sdp_pt(101, telephone-event, 8000);
 	sdp_pt(13, CN, 8000);
 	sdp_pt(118, CN, 16000);
-	ht_set(codec_accept, G722);
+	c_accept(G722);
 	offer();
 	expect(A, recv, "");
 	expect(A, send, "104/SILK/16000 9/G722/8000 0/PCMU/8000 8/PCMA/8000 101/telephone-event/8000 13/CN/8000 118/CN/16000");
@@ -1642,10 +1391,10 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(101, telephone-event, 8000);
-	ht_set(codec_mask, opus);
-	ht_set(codec_mask, G722);
-	ht_set(codec_mask, G7221);
-	ht_set(codec_accept, all);
+	c_mask(opus);
+	c_mask(G722);
+	c_mask(G7221);
+	c_accept(all);
 	offer();
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000 101/telephone-event/8000");
 	sdp_pt(8, PCMA, 8000);
@@ -1659,10 +1408,10 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(101, telephone-event, 8000);
-	ht_set(codec_mask, opus);
-	ht_set(codec_mask, G722);
-	ht_set(codec_mask, G7221);
-	ht_set(codec_accept, all);
+	c_mask(opus);
+	c_mask(G722);
+	c_mask(G7221);
+	c_accept(all);
 	offer();
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000 101/telephone-event/8000");
 	sdp_pt(8, PCMA, 8000);
@@ -1696,7 +1445,7 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(13, CN, 8000);
-	ht_set(codec_consume, CN);
+	c_consume(CN);
 	offer();
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000");
 	sdp_pt(8, PCMA, 8000);
@@ -1713,7 +1462,7 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(0, PCMU, 8000);
 	sdp_pt(13, CN, 8000);
-	ht_set(codec_accept, CN);
+	c_accept(CN);
 	offer();
 	expect(B, recv, "8/PCMA/8000 0/PCMU/8000 13/CN/8000");
 	sdp_pt(8, PCMA, 8000);
@@ -1730,7 +1479,7 @@ int main(void) {
 	sdp_pt(9, G722, 8000);
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(101, telephone-event, 8000);
-	ht_set(codec_mask, all);
+	c_mask(all);
 	transcode(opus/48000/1);
 	transcode(PCMA);
 	transcode(telephone-event);
@@ -1750,7 +1499,7 @@ int main(void) {
 	sdp_pt(8, PCMA, 8000);
 	sdp_pt(102, telephone-event, 48000);
 	sdp_pt(101, telephone-event, 8000);
-	ht_set(codec_mask, all);
+	c_mask(all);
 	transcode(opus);
 	transcode(PCMA);
 	transcode(PCMU);
