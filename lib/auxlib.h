@@ -1,6 +1,7 @@
 #ifndef _AUXLIB_H_
 #define _AUXLIB_H_
 
+#include <stdint.h>
 #include <glib.h>
 #include <assert.h>
 #include "compat.h"
